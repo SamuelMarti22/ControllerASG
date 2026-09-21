@@ -1,0 +1,47 @@
+{
+  "aws": {
+    "region": "us-east-1"
+  },
+  "compute": {
+    "launchTemplateId": "lt-0123456789abcdef0",
+    "launchTemplateVersion": "$Latest",
+    "minInstances": 1,
+    "maxInstances": 5,
+    "subnetIds": [
+      "subnet-xxxx",
+      "subnet-yyyy"
+    ],
+    "securityGroupIds": []
+  },
+  "loadBalancer": {
+    "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:123456789012:targetgroup/mi-tg/xxxx",
+    "targetPort": 80
+  },
+  "pollIntervalSeconds": 60,
+  "cooldownSeconds": 300,
+  "metrics": [
+    {
+      "namespace": "AWS/EC2",
+      "metricName": "CPUUtilization",
+      "period": 60,
+      "stat": "Average",
+      "scaling": {
+        "scaleUpThreshold": 70,
+        "scaleDownThreshold": 20
+      }
+    },
+    {
+      "namespace": "AWS/EC2",
+      "metricName": "NetworkIn",
+      "period": 60,
+      "stat": "Average",
+      "scaling": {
+        "scaleUpThreshold": 5000000,
+        "scaleDownThreshold": 500000
+      }
+    }
+  ],
+  "deployment": {
+    "useDocker": false
+  }
+}
