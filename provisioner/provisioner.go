@@ -108,13 +108,13 @@ func (p *Provisioner) Instances(ctx context.Context) ([]model.Instance, error) {
 // ScaleUp lanza una instancia desde el launch template, espera a que esté
 // running y la registra en el target group. Si el registro falla, la termina
 // para no dejar capacidad huérfana que costaría sin servir tráfico.
-func (p *Provisioner) ScaleUp(ctx context.Context) error {
+func (p *Provisioner) ScaleUp(ctx context.Context) (string, error) {
 	fleet, err := p.Instances(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if len(fleet) >= p.config.Compute.MaxInstances {
-		return fmt.Errorf("ya hay %d instancias, el máximo es %d", len(fleet), p.config.Compute.MaxInstances)
+		return "", fmt.Errorf("ya hay %d instancias, el máximo es %d", len(fleet), p.config.Compute.MaxInstances)
 	}
 
 	runInput := &ec2.RunInstancesInput{
@@ -133,17 +133,17 @@ func (p *Provisioner) ScaleUp(ctx context.Context) error {
 	}
 	run, err := p.ec2.RunInstances(ctx, runInput)
 	if err != nil {
-		return fmt.Errorf("RunInstances: %w", err)
+		return "", fmt.Errorf("RunInstances: %w", err)
 	}
 	if len(run.Instances) == 0 {
-		return fmt.Errorf("RunInstances no devolvió instancias")
+		return "", fmt.Errorf("RunInstances no devolvió instancias")
 	}
 	id := aws.ToString(run.Instances[0].InstanceId)
 
 	waiter := ec2.NewInstanceRunningWaiter(p.ec2)
 	if err := waiter.Wait(ctx, &ec2.DescribeInstancesInput{InstanceIds: []string{id}}, p.runningTimeout); err != nil {
 		p.rollback(id)
-		return fmt.Errorf("la instancia %s no llegó a running: %w", id, err)
+		return id, fmt.Errorf("la instancia %s no llegó a running: %w", id, err)
 	}
 
 	_, err = p.elb.RegisterTargets(ctx, &elbv2.RegisterTargetsInput{
@@ -152,24 +152,24 @@ func (p *Provisioner) ScaleUp(ctx context.Context) error {
 	})
 	if err != nil {
 		p.rollback(id)
-		return fmt.Errorf("RegisterTargets de %s: %w", id, err)
+		return id, fmt.Errorf("RegisterTargets de %s: %w", id, err)
 	}
-	return nil
+	return id, nil
 }
 
 // ScaleDown elige una instancia, la saca del target group, espera a que drene
-// sus conexiones y la termina.
-func (p *Provisioner) ScaleDown(ctx context.Context) error {
+// sus conexiones y la termina. Devuelve el id de la instancia elegida.
+func (p *Provisioner) ScaleDown(ctx context.Context) (string, error) {
 	fleet, err := p.Instances(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if len(fleet) <= p.config.Compute.MinInstances {
-		return fmt.Errorf("hay %d instancias, el mínimo es %d", len(fleet), p.config.Compute.MinInstances)
+		return "", fmt.Errorf("hay %d instancias, el mínimo es %d", len(fleet), p.config.Compute.MinInstances)
 	}
 
 	if warming := warmingUp(fleet); warming != "" {
-		return fmt.Errorf("no es seguro reducir: %s aún se está inicializando", warming)
+		return "", fmt.Errorf("no es seguro reducir: %s aún se está inicializando", warming)
 	}
 
 	victim := pickVictim(fleet)
@@ -180,15 +180,15 @@ func (p *Provisioner) ScaleDown(ctx context.Context) error {
 			Targets:        []elbtypes.TargetDescription{{Id: aws.String(victim.Id), Port: aws.Int32(int32(p.config.LoadBalancer.TargetPort))}},
 		})
 		if err != nil {
-			return fmt.Errorf("DeregisterTargets de %s: %w", victim.Id, err)
+			return victim.Id, fmt.Errorf("DeregisterTargets de %s: %w", victim.Id, err)
 		}
 		p.waitDrained(ctx, victim.Id)
 	}
 
 	if _, err := p.ec2.TerminateInstances(ctx, &ec2.TerminateInstancesInput{InstanceIds: []string{victim.Id}}); err != nil {
-		return fmt.Errorf("TerminateInstances de %s: %w", victim.Id, err)
+		return victim.Id, fmt.Errorf("TerminateInstances de %s: %w", victim.Id, err)
 	}
-	return nil
+	return victim.Id, nil
 }
 
 // pickSubnet reparte la flota entre zonas de disponibilidad: elige la subred

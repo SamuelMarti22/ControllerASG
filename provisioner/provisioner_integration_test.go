@@ -60,10 +60,11 @@ func TestIntegrationScaleUpAndDown(t *testing.T) {
 	})
 
 	start := time.Now()
-	if err := p.ScaleUp(ctx); err != nil {
+	id, err := p.ScaleUp(ctx)
+	if err != nil {
 		t.Fatalf("ScaleUp: %v", err)
 	}
-	t.Logf("ScaleUp completado en %s (instancia en running y registrada)", time.Since(start).Round(time.Second))
+	t.Logf("ScaleUp completado en %s (%s en running y registrada)", time.Since(start).Round(time.Second), id)
 
 	// running no es lo mismo que disponible: esperar al health check del target group.
 	var healthyAfter time.Duration
@@ -88,7 +89,7 @@ func TestIntegrationScaleUpAndDown(t *testing.T) {
 	}
 	t.Logf("Tiempo desde la orden hasta capacidad realmente disponible: %s", healthyAfter.Round(time.Second))
 
-	if err := p.ScaleDown(ctx); err != nil {
+	if _, err := p.ScaleDown(ctx); err != nil {
 		t.Fatalf("ScaleDown: %v", err)
 	}
 	t.Log("ScaleDown completado (desregistrada y orden de terminación enviada)")

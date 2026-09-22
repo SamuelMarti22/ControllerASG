@@ -12,67 +12,94 @@ type MetricsSource interface {
 	Observe(ctx context.Context) ([]model.ObservedMetric, error)
 }
 
+// Fleet informa de las instancias gestionadas y su salud: es la fuente de verdad
+// de la capacidad.
+type Fleet interface {
+	Instances(ctx context.Context) ([]model.Instance, error)
+}
+
+// Actuator devuelve el id de la instancia creada o retirada.
 type Actuator interface {
-	ScaleUp(ctx context.Context) error
-	ScaleDown(ctx context.Context) error
+	ScaleUp(ctx context.Context) (string, error)
+	ScaleDown(ctx context.Context) (string, error)
 }
 
 type Logger interface {
-	LogError(err error)
-	LogDecision(decision model.Decision, reason string, observed []model.ObservedMetric, currentCount int)
-	LogActionResult(decision model.Decision, err error)
+	Log(rec model.DecisionRecord)
 }
 
 type Controller struct {
 	config       *configuration.Config
 	metrics      MetricsSource
+	fleet        Fleet
 	actuator     Actuator
 	logger       Logger
 	lastActionAt time.Time
-	currentCount int
 }
 
-func New(config *configuration.Config, metrics MetricsSource, actuator Actuator, logger Logger, currentCount int) *Controller {
-	return &Controller{
-		config:       config,
-		metrics:      metrics,
-		actuator:     actuator,
-		logger:       logger,
-		currentCount: currentCount,
-	}
+func New(config *configuration.Config, metrics MetricsSource, fleet Fleet, actuator Actuator, logger Logger) *Controller {
+	return &Controller{config: config, metrics: metrics, fleet: fleet, actuator: actuator, logger: logger}
 }
 
+// Tick ejecuta un ciclo observar → decidir → actuar y registra exactamente un
+// DecisionRecord, incluso cuando algo falla.
 func (c *Controller) Tick(ctx context.Context) {
-	observed, err := c.metrics.Observe(ctx)
+	rec := model.DecisionRecord{
+		Time:          time.Now(),
+		Decision:      model.Maintain,
+		WindowSeconds: c.config.ObservationWindowSeconds,
+		Action:        "none",
+		Result:        "none",
+	}
+	defer func() { c.logger.Log(rec) }()
+
+	fleet, err := c.fleet.Instances(ctx)
 	if err != nil {
-		c.logger.LogError(err) // fail-safe: si no hay métricas confiables, NO actúes
+		// sin saber cuánta capacidad hay no se puede actuar con seguridad
+		rec.Reason = "no se pudo leer la flota, no se actúa"
+		rec.Error = err.Error()
 		return
 	}
+	rec.Capacity = summarize(fleet)
 
-	decision, reason := c.decide(observed)
-	c.logger.LogDecision(decision, reason, observed, c.currentCount)
-
-	switch decision {
-	case model.Increase:
-		if err := c.actuator.ScaleUp(ctx); err != nil {
-			c.logger.LogActionResult(decision, err)
-			return
-		}
-		c.logger.LogActionResult(decision, nil)
-		c.currentCount++
-		c.lastActionAt = time.Now()
-	case model.Reduce:
-		if err := c.actuator.ScaleDown(ctx); err != nil {
-			c.logger.LogActionResult(decision, err)
-			return
-		}
-		c.logger.LogActionResult(decision, nil)
-		c.currentCount--
-		c.lastActionAt = time.Now()
+	observed, obsErr := c.metrics.Observe(ctx)
+	if obsErr != nil {
+		observed = nil
+		rec.Error = "observación: " + obsErr.Error()
 	}
+	rec.Metrics = observed
+
+	rec.Decision, rec.Reason = c.decide(observed, len(fleet))
+	if obsErr != nil && rec.Decision == model.Maintain {
+		rec.Reason = "métricas no disponibles, no se actúa"
+	}
+
+	switch rec.Decision {
+	case model.Increase:
+		rec.Action = "ScaleUp"
+		rec.InstanceID, err = c.actuator.ScaleUp(ctx)
+	case model.Reduce:
+		rec.Action = "ScaleDown"
+		rec.InstanceID, err = c.actuator.ScaleDown(ctx)
+	default:
+		return
+	}
+	if err != nil {
+		rec.Result = "error"
+		rec.Error = err.Error()
+		return
+	}
+	rec.Result = "ok"
+	c.lastActionAt = time.Now()
 }
 
-func (c *Controller) decide(observed []model.ObservedMetric) (model.Decision, string) {
+func (c *Controller) decide(observed []model.ObservedMetric, currentCount int) (model.Decision, string) {
+	// El mínimo es una regla de seguridad: se restablece aunque no haya métricas
+	// ni cooldown (arranque en frío, o una instancia que murió).
+	if currentCount < c.config.Compute.MinInstances {
+		return model.Increase, "capacidad por debajo del mínimo configurado"
+	}
+
 	if time.Since(c.lastActionAt) < time.Duration(c.config.CooldownSeconds)*time.Second {
 		return model.Maintain, "en cooldown"
 	}
@@ -103,13 +130,24 @@ func (c *Controller) decide(observed []model.ObservedMetric) (model.Decision, st
 	}
 
 	switch {
-	case anyAboveUp && c.currentCount < c.config.Compute.MaxInstances:
+	case anyAboveUp && currentCount < c.config.Compute.MaxInstances:
 		return model.Increase, "al menos una métrica superó su umbral de subida"
-	case allBelowDown && c.currentCount > c.config.Compute.MinInstances:
+	case allBelowDown && currentCount > c.config.Compute.MinInstances:
 		return model.Reduce, "todas las métricas están por debajo de su umbral de bajada"
 	default:
 		return model.Maintain, "condiciones estables, métricas incompletas o en límites de min/max"
 	}
+}
+
+func summarize(fleet []model.Instance) model.Capacity {
+	cap := model.Capacity{Total: len(fleet), Instances: make([]model.InstanceStatus, 0, len(fleet))}
+	for _, i := range fleet {
+		if i.Health == "healthy" {
+			cap.Healthy++
+		}
+		cap.Instances = append(cap.Instances, model.InstanceStatus{ID: i.Id, State: i.State, Health: i.Health})
+	}
+	return cap
 }
 
 func toMap(observed []model.ObservedMetric) map[string]float64 {

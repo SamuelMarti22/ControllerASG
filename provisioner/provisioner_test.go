@@ -146,7 +146,7 @@ func TestInstancesMergesHealthAndMarksUnregistered(t *testing.T) {
 func TestScaleUpLaunchesTagsAndRegisters(t *testing.T) {
 	p, e, l, _ := setup([]ec2types.Instance{inst("i-a", t0)}, map[string]elbtypes.TargetHealthStateEnum{"i-a": "healthy"})
 
-	if err := p.ScaleUp(context.Background()); err != nil {
+	if _, err := p.ScaleUp(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if aws.ToString(e.launched.LaunchTemplate.LaunchTemplateId) != "lt-1" {
@@ -179,7 +179,7 @@ func TestScaleUpRefusesAtMax(t *testing.T) {
 	fleet := []ec2types.Instance{inst("i-a", t0), inst("i-b", t0), inst("i-c", t0)}
 	p, e, _, _ := setup(fleet, map[string]elbtypes.TargetHealthStateEnum{})
 
-	if err := p.ScaleUp(context.Background()); err == nil {
+	if _, err := p.ScaleUp(context.Background()); err == nil {
 		t.Fatal("esperaba error al superar el máximo")
 	}
 	if e.launched != nil {
@@ -191,7 +191,7 @@ func TestScaleUpRollsBackWhenRegisterFails(t *testing.T) {
 	p, e, l, _ := setup([]ec2types.Instance{inst("i-a", t0)}, map[string]elbtypes.TargetHealthStateEnum{})
 	l.registerErr = errors.New("boom")
 
-	if err := p.ScaleUp(context.Background()); err == nil {
+	if _, err := p.ScaleUp(context.Background()); err == nil {
 		t.Fatal("esperaba error")
 	}
 	if len(e.terminated) != 1 || e.terminated[0] != "i-new" {
@@ -203,7 +203,7 @@ func TestScaleUpPropagatesRunError(t *testing.T) {
 	p, e, l, _ := setup([]ec2types.Instance{inst("i-a", t0)}, map[string]elbtypes.TargetHealthStateEnum{})
 	e.runErr = errors.New("InsufficientInstanceCapacity")
 
-	if err := p.ScaleUp(context.Background()); !errors.Is(err, e.runErr) {
+	if _, err := p.ScaleUp(context.Background()); !errors.Is(err, e.runErr) {
 		t.Errorf("error = %v", err)
 	}
 	if len(l.registered) != 0 {
@@ -217,7 +217,7 @@ func TestScaleDownDeregistersDrainsThenTerminates(t *testing.T) {
 		map[string]elbtypes.TargetHealthStateEnum{"i-old": "healthy", "i-new": "healthy"},
 	)
 
-	if err := p.ScaleDown(context.Background()); err != nil {
+	if _, err := p.ScaleDown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(l.deregistered) != 1 || l.deregistered[0] != "i-new" {
@@ -239,7 +239,7 @@ func TestScaleDownPrefersUnhealthy(t *testing.T) {
 		[]ec2types.Instance{inst("i-bad", t0), inst("i-good", t0.Add(time.Hour))},
 		map[string]elbtypes.TargetHealthStateEnum{"i-bad": "unhealthy", "i-good": "healthy"},
 	)
-	if err := p.ScaleDown(context.Background()); err != nil {
+	if _, err := p.ScaleDown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(e.terminated) != 1 || e.terminated[0] != "i-bad" {
@@ -250,7 +250,7 @@ func TestScaleDownPrefersUnhealthy(t *testing.T) {
 func TestScaleDownRefusesAtMin(t *testing.T) {
 	p, e, _, _ := setup([]ec2types.Instance{inst("i-a", t0)}, map[string]elbtypes.TargetHealthStateEnum{"i-a": "healthy"})
 
-	if err := p.ScaleDown(context.Background()); err == nil {
+	if _, err := p.ScaleDown(context.Background()); err == nil {
 		t.Fatal("esperaba error al bajar del mínimo")
 	}
 	if len(e.terminated) != 0 {
@@ -264,7 +264,7 @@ func TestScaleDownRefusesWhileInstanceWarmingUp(t *testing.T) {
 		map[string]elbtypes.TargetHealthStateEnum{"i-a": "healthy", "i-b": "initial"},
 	)
 
-	if err := p.ScaleDown(context.Background()); err == nil {
+	if _, err := p.ScaleDown(context.Background()); err == nil {
 		t.Fatal("esperaba rechazo: hay una instancia inicializando")
 	}
 	if len(e.terminated) != 0 || len(l.deregistered) != 0 {
@@ -277,7 +277,7 @@ func TestScaleDownSkipsDeregisterForUnregistered(t *testing.T) {
 		[]ec2types.Instance{inst("i-a", t0), inst("i-orphan", t0.Add(time.Hour))},
 		map[string]elbtypes.TargetHealthStateEnum{"i-a": "healthy"},
 	)
-	if err := p.ScaleDown(context.Background()); err != nil {
+	if _, err := p.ScaleDown(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if len(l.deregistered) != 0 {
