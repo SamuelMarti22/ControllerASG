@@ -25,11 +25,16 @@ import (
 func main() {
 	configPath := flag.String("config", "conf.json", "ruta del archivo de configuración")
 	logPath := flag.String("log", "decisions.jsonl", "archivo donde se anota cada decisión (JSON Lines)")
+	checkOnly := flag.Bool("check", false, "solo carga y valida la configuración, no contacta AWS ni inicia el ciclo")
 	flag.Parse()
 
 	config, err := configuration.Load(*configPath)
 	if err != nil {
 		log.Fatalf("No se pudo cargar la configuración: %v", err)
+	}
+	if *checkOnly {
+		log.Printf("configuración válida: %s", *configPath)
+		return
 	}
 
 	logFile, err := os.OpenFile(*logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)

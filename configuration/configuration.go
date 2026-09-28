@@ -38,9 +38,13 @@ type MetricPolicy struct {
 	Namespace  string
 	MetricName string
 	Dimensions []Dimension
-	Period     int
-	Stat       string
-	Scaling    ScalingConfig
+	// PerInstance marca una métrica que no existe a nivel de target group (p. ej.
+	// CPUUtilization): el observer la consulta por cada instancia de la flota
+	// (dimensión InstanceId) y promedia los resultados. No debe traer Dimensions.
+	PerInstance bool
+	Period      int
+	Stat        string
+	Scaling     ScalingConfig
 }
 
 type DeploymentConfig struct {
@@ -111,6 +115,9 @@ func (config *Config) Validate() error {
 	for _, m := range config.Metrics {
 		if m.Namespace == "" || m.MetricName == "" || m.Stat == "" {
 			return fmt.Errorf("métrica %q: namespace, metricName y stat son obligatorios", m.MetricName)
+		}
+		if m.PerInstance && len(m.Dimensions) > 0 {
+			return fmt.Errorf("métrica %q: perInstance no debe traer dimensions, se generan una por instancia", m.MetricName)
 		}
 		if m.Period <= 0 || m.Period%60 != 0 {
 			return fmt.Errorf("métrica %q: period debe ser un múltiplo positivo de 60", m.MetricName)

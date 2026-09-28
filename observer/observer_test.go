@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch/types"
 
 	"controllerasg/configuration"
+	"controllerasg/model"
 )
 
 // fakeClient devuelve páginas predefinidas, una por llamada.
@@ -39,6 +40,10 @@ func testMetrics() []configuration.MetricPolicy {
 	}
 }
 
+func cpuMetric() configuration.MetricPolicy {
+	return configuration.MetricPolicy{Namespace: "AWS/EC2", MetricName: "CPUUtilization", PerInstance: true, Period: 60, Stat: "Average"}
+}
+
 func result(id string, values ...float64) types.MetricDataResult {
 	ts := make([]time.Time, len(values))
 	base := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
@@ -50,10 +55,13 @@ func result(id string, values ...float64) types.MetricDataResult {
 
 func TestBuildQueries(t *testing.T) {
 	o := New(&fakeClient{}, testMetrics(), 5*time.Minute)
-	qs := o.buildQueries()
+	qs, ids := o.buildQueries(nil)
 
 	if len(qs) != 2 {
 		t.Fatalf("esperaba 2 queries, obtuve %d", len(qs))
+	}
+	if len(ids[0]) != 1 || ids[0][0] != "m0" || len(ids[1]) != 1 || ids[1][0] != "m1" {
+		t.Errorf("ids = %v, esperaba una por política", ids)
 	}
 	q := qs[1]
 	if aws.ToString(q.Id) != "m1" {
@@ -71,6 +79,31 @@ func TestBuildQueries(t *testing.T) {
 	}
 }
 
+func TestBuildQueriesPerInstance(t *testing.T) {
+	o := New(&fakeClient{}, []configuration.MetricPolicy{cpuMetric()}, 5*time.Minute)
+	fleet := []model.Instance{{Id: "i-aaa"}, {Id: "i-bbb"}}
+
+	qs, ids := o.buildQueries(fleet)
+
+	if len(qs) != 2 {
+		t.Fatalf("esperaba 1 consulta por instancia, obtuve %d", len(qs))
+	}
+	if len(ids[0]) != 2 {
+		t.Fatalf("esperaba 2 ids para la política 0, obtuve %v", ids[0])
+	}
+	seen := map[string]bool{}
+	for _, q := range qs {
+		id := aws.ToString(q.Id)
+		seen[id] = true
+		if len(q.MetricStat.Metric.Dimensions) != 1 || aws.ToString(q.MetricStat.Metric.Dimensions[0].Name) != "InstanceId" {
+			t.Errorf("%s: esperaba dimensión InstanceId, obtuve %+v", id, q.MetricStat.Metric.Dimensions)
+		}
+	}
+	if !seen["m0_iaaa"] || !seen["m0_ibbb"] {
+		t.Errorf("ids inesperados: %v", seen)
+	}
+}
+
 func TestObserveAveragesWindow(t *testing.T) {
 	client := &fakeClient{pages: []*cloudwatch.GetMetricDataOutput{{
 		MetricDataResults: []types.MetricDataResult{
@@ -80,7 +113,7 @@ func TestObserveAveragesWindow(t *testing.T) {
 	}}}
 	o := New(client, testMetrics(), 5*time.Minute)
 
-	got, err := o.Observe(context.Background())
+	got, err := o.Observe(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,6 +134,87 @@ func TestObserveAveragesWindow(t *testing.T) {
 	}
 }
 
+func TestObservePerInstanceAveragesAcrossFleet(t *testing.T) {
+	client := &fakeClient{pages: []*cloudwatch.GetMetricDataOutput{{
+		MetricDataResults: []types.MetricDataResult{
+			result("m0_iaaa", 80, 90), // promedio de ventana: 85
+			result("m0_ibbb", 20, 30), // promedio de ventana: 25
+		},
+	}}}
+	o := New(client, []configuration.MetricPolicy{cpuMetric()}, 5*time.Minute)
+	fleet := []model.Instance{{Id: "i-aaa"}, {Id: "i-bbb"}}
+
+	got, err := o.Observe(context.Background(), fleet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Name != "CPUUtilization" {
+		t.Fatalf("esperaba CPUUtilization, obtuve %+v", got)
+	}
+	if got[0].Value != 55 { // promedio de (85, 25)
+		t.Errorf("CPU = %v, esperaba 55 (promedio entre instancias)", got[0].Value)
+	}
+}
+
+func TestObservePerInstanceIgnoresInstancesWithoutData(t *testing.T) {
+	client := &fakeClient{pages: []*cloudwatch.GetMetricDataOutput{{
+		MetricDataResults: []types.MetricDataResult{
+			result("m0_iaaa", 60),
+			result("m0_ibbb"), // recién lanzada, sin datapoints todavía
+		},
+	}}}
+	o := New(client, []configuration.MetricPolicy{cpuMetric()}, 5*time.Minute)
+	fleet := []model.Instance{{Id: "i-aaa"}, {Id: "i-bbb"}}
+
+	got, err := o.Observe(context.Background(), fleet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Value != 60 {
+		t.Errorf("esperaba solo el promedio de la instancia con datos (60), obtuve %+v", got)
+	}
+}
+
+func TestObservePerInstanceOmittedWhenNoInstanceHasData(t *testing.T) {
+	client := &fakeClient{pages: []*cloudwatch.GetMetricDataOutput{{
+		MetricDataResults: []types.MetricDataResult{result("m0_iaaa"), result("m0_ibbb")},
+	}}}
+	o := New(client, []configuration.MetricPolicy{cpuMetric()}, 5*time.Minute)
+	fleet := []model.Instance{{Id: "i-aaa"}, {Id: "i-bbb"}}
+
+	got, err := o.Observe(context.Background(), fleet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("sin datos en ninguna instancia, esperaba omitir la métrica, obtuve %+v", got)
+	}
+}
+
+func TestObserveMixesStaticAndPerInstanceMetrics(t *testing.T) {
+	client := &fakeClient{pages: []*cloudwatch.GetMetricDataOutput{{
+		MetricDataResults: []types.MetricDataResult{
+			result("m0", 500),
+			result("m1_iaaa", 40),
+		},
+	}}}
+	metrics := append([]configuration.MetricPolicy{testMetrics()[0]}, cpuMetric())
+	o := New(client, metrics, 5*time.Minute)
+	fleet := []model.Instance{{Id: "i-aaa"}}
+
+	got, err := o.Observe(context.Background(), fleet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("esperaba las 2 métricas, obtuve %+v", got)
+	}
+	byName := map[string]float64{got[0].Name: got[0].Value, got[1].Name: got[1].Value}
+	if byName["RequestCountPerTarget"] != 500 || byName["CPUUtilization"] != 40 {
+		t.Errorf("valores mezclados incorrectos: %v", byName)
+	}
+}
+
 func TestObserveOmitsMetricsWithoutData(t *testing.T) {
 	client := &fakeClient{pages: []*cloudwatch.GetMetricDataOutput{{
 		MetricDataResults: []types.MetricDataResult{
@@ -110,7 +224,7 @@ func TestObserveOmitsMetricsWithoutData(t *testing.T) {
 	}}}
 	o := New(client, testMetrics(), 5*time.Minute)
 
-	got, err := o.Observe(context.Background())
+	got, err := o.Observe(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +237,7 @@ func TestObserveNoDataAtAll(t *testing.T) {
 	client := &fakeClient{pages: []*cloudwatch.GetMetricDataOutput{{}}}
 	o := New(client, testMetrics(), 5*time.Minute)
 
-	got, err := o.Observe(context.Background())
+	got, err := o.Observe(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +253,7 @@ func TestObserveMergesPages(t *testing.T) {
 	}}
 	o := New(client, testMetrics()[:1], 5*time.Minute)
 
-	got, err := o.Observe(context.Background())
+	got, err := o.Observe(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +269,7 @@ func TestObservePropagatesAWSError(t *testing.T) {
 	boom := errors.New("throttled")
 	o := New(&fakeClient{err: boom}, testMetrics(), 5*time.Minute)
 
-	got, err := o.Observe(context.Background())
+	got, err := o.Observe(context.Background(), nil)
 	if !errors.Is(err, boom) {
 		t.Errorf("esperaba error envuelto, obtuve %v", err)
 	}
@@ -172,7 +286,7 @@ func TestObserveForbidden(t *testing.T) {
 	}}}
 	o := New(client, testMetrics(), 5*time.Minute)
 
-	if _, err := o.Observe(context.Background()); err == nil {
+	if _, err := o.Observe(context.Background(), nil); err == nil {
 		t.Error("esperaba error por acceso denegado")
 	}
 }

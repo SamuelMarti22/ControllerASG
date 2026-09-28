@@ -8,8 +8,10 @@ import (
 	"controllerasg/model"
 )
 
+// MetricsSource observa el estado de la aplicación. Recibe la flota actual
+// porque algunas métricas (p. ej. CPU) se consultan por instancia.
 type MetricsSource interface {
-	Observe(ctx context.Context) ([]model.ObservedMetric, error)
+	Observe(ctx context.Context, fleet []model.Instance) ([]model.ObservedMetric, error)
 }
 
 // Fleet informa de las instancias gestionadas y su salud: es la fuente de verdad
@@ -62,7 +64,7 @@ func (c *Controller) Tick(ctx context.Context) {
 	}
 	rec.Capacity = summarize(fleet)
 
-	observed, obsErr := c.metrics.Observe(ctx)
+	observed, obsErr := c.metrics.Observe(ctx, fleet)
 	if obsErr != nil {
 		observed = nil
 		rec.Error = "observación: " + obsErr.Error()
@@ -116,9 +118,12 @@ func (c *Controller) decide(observed []model.ObservedMetric, currentCount int) (
 	for _, policy := range c.config.Metrics {
 		v, ok := values[policy.MetricName]
 		if !ok {
-			// sin dato no se puede afirmar que sea seguro reducir capacidad,
-			// pero tampoco bloquea un aumento por otra métrica
-			allBelowDown = false
+			// Una métrica sin dato se abstiene: ni confirma ni bloquea la
+			// reducción. Para métricas de demanda (requests, latencia), la
+			// ausencia de datapoints en CloudWatch significa "no hubo
+			// tráfico", que es justamente la señal de que es seguro reducir
+			// — no un fallo de observación. La ceguera total (ninguna
+			// métrica con dato) ya está cubierta arriba por len(observed)==0.
 			continue
 		}
 		if v >= policy.Scaling.ScaleUpThreshold {

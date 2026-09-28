@@ -15,7 +15,9 @@ type fakeMetrics struct {
 	err    error
 }
 
-func (f fakeMetrics) Observe(context.Context) ([]model.ObservedMetric, error) { return f.values, f.err }
+func (f fakeMetrics) Observe(context.Context, []model.Instance) ([]model.ObservedMetric, error) {
+	return f.values, f.err
+}
 
 type fakeFleet struct {
 	instances []model.Instance
@@ -90,6 +92,27 @@ func TestScaleDownOnLowLoad(t *testing.T) {
 	_, rec := run(load(5), fakeFleet{instances: healthy(2)}, a)
 	if rec.Decision != model.Reduce || a.downs != 1 || rec.InstanceID != "i-old" {
 		t.Errorf("registro inesperado: %+v", rec)
+	}
+}
+
+// TestScaleDownIgnoresMissingMetricThatWentQuiet reproduce el caso real: con
+// tráfico cero, CloudWatch deja de publicar datapoints de TargetResponseTime
+// por completo (no los reporta en 0). Esa ausencia no debe impedir reducir
+// si otra métrica (CPU) sí confirma que la carga está baja.
+func TestScaleDownIgnoresMissingMetricThatWentQuiet(t *testing.T) {
+	cfg := testConfig()
+	cfg.Metrics = append(cfg.Metrics, configuration.MetricPolicy{
+		MetricName: "requests", // nunca aparece en lo observado: simula la métrica que se quedó muda
+		Scaling:    configuration.ScalingConfig{ScaleUpThreshold: 1000, ScaleDownThreshold: 200},
+	})
+	a := &fakeActuator{}
+	l := &memLogger{}
+	c := New(cfg, load(5), fakeFleet{instances: healthy(2)}, a, l) // solo "load" reporta, 5 < umbral de bajada (20)
+	c.Tick(context.Background())
+
+	rec := l.recs[0]
+	if rec.Decision != model.Reduce || a.downs != 1 {
+		t.Errorf("una métrica ausente no debería bloquear la reducción: %+v", rec)
 	}
 }
 

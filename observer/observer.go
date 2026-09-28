@@ -3,6 +3,7 @@ package observer
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -30,46 +31,74 @@ func New(client cloudwatch.GetMetricDataAPIClient, metrics []configuration.Metri
 }
 
 // Observe consulta todas las métricas y devuelve, por cada una, un valor
-// ponderado de la ventana de observación. Las métricas sin datos se omiten
-// (no se reportan como 0): el controller decide qué hacer con la información
-// incompleta.
-func (observer *CloudWatchObserver) Observe(ctx context.Context) ([]model.ObservedMetric, error) {
-	queries := observer.buildQueries()
+// ponderado de la ventana de observación. Las métricas "por instancia" (p. ej.
+// CPU) se consultan una vez por cada instancia de fleet y se promedian entre
+// sí. Las métricas sin datos se omiten (no se reportan como 0): el controller
+// decide qué hacer con la información incompleta.
+func (observer *CloudWatchObserver) Observe(ctx context.Context, fleet []model.Instance) ([]model.ObservedMetric, error) {
+	queries, ids := observer.buildQueries(fleet)
 
 	raw, err := observer.fetchSeries(ctx, queries)
 	if err != nil {
 		return nil, err
 	}
 
-	return observer.average(raw), nil
+	return observer.aggregate(raw, ids), nil
 }
 
 func queryID(i int) string {
 	return fmt.Sprintf("m%d", i) // el id debe empezar con minúscula
 }
 
-// buildQueries traduce cada política de métrica del config a una consulta de GetMetricData.
-func (observer *CloudWatchObserver) buildQueries() []types.MetricDataQuery {
-	queries := make([]types.MetricDataQuery, 0, len(observer.metrics))
+// instanceQueryID identifica la consulta de la política i para una instancia
+// concreta. El id de CloudWatch solo admite letras, dígitos y '_', por eso se
+// quita el guion de "i-xxxx".
+func instanceQueryID(i int, instanceID string) string {
+	return fmt.Sprintf("m%d_%s", i, strings.ReplaceAll(instanceID, "-", ""))
+}
+
+// buildQueries traduce cada política de métrica del config a una o varias
+// consultas de GetMetricData, y devuelve además, por política, la lista de
+// ids que hay que promediar para obtener su valor final.
+func (observer *CloudWatchObserver) buildQueries(fleet []model.Instance) ([]types.MetricDataQuery, map[int][]string) {
+	var queries []types.MetricDataQuery
+	ids := make(map[int][]string, len(observer.metrics))
+
 	for i, m := range observer.metrics {
+		if m.PerInstance {
+			for _, inst := range fleet {
+				id := instanceQueryID(i, inst.Id)
+				ids[i] = append(ids[i], id)
+				queries = append(queries, metricQuery(id, m.Namespace, m.MetricName, m.Period, m.Stat,
+					[]types.Dimension{{Name: aws.String("InstanceId"), Value: aws.String(inst.Id)}}))
+			}
+			continue
+		}
+
 		dimensions := make([]types.Dimension, 0, len(m.Dimensions))
 		for _, d := range m.Dimensions {
 			dimensions = append(dimensions, types.Dimension{Name: aws.String(d.Name), Value: aws.String(d.Value)})
 		}
-		queries = append(queries, types.MetricDataQuery{
-			Id: aws.String(queryID(i)),
-			MetricStat: &types.MetricStat{
-				Metric: &types.Metric{
-					Namespace:  aws.String(m.Namespace),
-					MetricName: aws.String(m.MetricName),
-					Dimensions: dimensions,
-				},
-				Period: aws.Int32(int32(m.Period)),
-				Stat:   aws.String(m.Stat),
-			},
-		})
+		id := queryID(i)
+		ids[i] = []string{id}
+		queries = append(queries, metricQuery(id, m.Namespace, m.MetricName, m.Period, m.Stat, dimensions))
 	}
-	return queries
+	return queries, ids
+}
+
+func metricQuery(id, namespace, metricName string, period int, stat string, dimensions []types.Dimension) types.MetricDataQuery {
+	return types.MetricDataQuery{
+		Id: aws.String(id),
+		MetricStat: &types.MetricStat{
+			Metric: &types.Metric{
+				Namespace:  aws.String(namespace),
+				MetricName: aws.String(metricName),
+				Dimensions: dimensions,
+			},
+			Period: aws.Int32(int32(period)),
+			Stat:   aws.String(stat),
+		},
+	}
 }
 
 // fetchSeries ejecuta las consultas en un solo GetMetricData (con paginación)
@@ -110,24 +139,44 @@ func (observer *CloudWatchObserver) fetchSeries(ctx context.Context, queries []t
 	return raw, nil
 }
 
-// average reduce los datapoints de cada métrica a un solo valor (promedio de
-// la ventana). Las métricas sin datapoints se omiten.
-func (observer *CloudWatchObserver) average(raw map[string]*series) []model.ObservedMetric {
+// windowAverage promedia los datapoints de una consulta en la ventana de
+// observación. ok=false si no llegó ningún datapoint.
+func windowAverage(s *series) (avg float64, ok bool) {
+	if s == nil || len(s.values) == 0 {
+		return 0, false
+	}
+	var sum float64
+	for _, v := range s.values {
+		sum += v
+	}
+	return sum / float64(len(s.values)), true
+}
+
+// aggregate reduce cada política a un solo valor: el promedio de la ventana
+// de cada una de sus consultas (una para una métrica normal, una por
+// instancia para una métrica PerInstance) promediado a su vez entre ellas.
+// Una política sin ningún dato se omite (no se reporta como 0).
+func (observer *CloudWatchObserver) aggregate(raw map[string]*series, ids map[int][]string) []model.ObservedMetric {
 	var result []model.ObservedMetric
 	for i, m := range observer.metrics {
-		s, ok := raw[queryID(i)]
-		if !ok || len(s.values) == 0 {
+		var sum float64
+		var n int
+		var newest time.Time
+		for _, id := range ids[i] {
+			avg, ok := windowAverage(raw[id])
+			if !ok {
+				continue
+			}
+			sum += avg
+			n++
+			if s := raw[id]; s.newest.After(newest) {
+				newest = s.newest
+			}
+		}
+		if n == 0 {
 			continue
 		}
-		var sum float64
-		for _, v := range s.values {
-			sum += v
-		}
-		result = append(result, model.ObservedMetric{
-			Name:      m.MetricName,
-			Value:     sum / float64(len(s.values)),
-			Timestamp: s.newest,
-		})
+		result = append(result, model.ObservedMetric{Name: m.MetricName, Value: sum / float64(n), Timestamp: newest})
 	}
 	return result
 }
