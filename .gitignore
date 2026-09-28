@@ -1,5 +1,4 @@
 conf.json
 .aws
 infra/state.env
-bin/
 decisions.jsonl
