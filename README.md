@@ -197,13 +197,7 @@ tráfico", que es justamente señal de que es seguro reducir.
 
 ```bash
 # Opción rápida (puede traer una versión más antigua):
-sudo apt-get update && sudo apt-get install -y golang-go python3
-
-# Opción recomendada (versión concreta):
-curl -LO https://go.dev/dl/go1.27.1.linux-amd64.tar.gz
-sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.27.1.linux-amd64.tar.gz
-export PATH=$PATH:/usr/local/go/bin   # añádelo a ~/.bashrc para que persista
-go version
+sudo apt-get update && sudo apt-get install -y golang-go python3 build-essential
 ```
 
 **AWS CLI** (solo si usarás `infra/`):
