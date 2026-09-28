@@ -215,7 +215,7 @@ sudo apt-get install -y awscli   # o la instalación oficial de AWS CLI v2
 Clonar el repositorio:
 
 ```bash
-git clone <URL-del-repo> ControllerASG
+git clone https://github.com/SamuelMarti22/ControllerASG ControllerASG
 cd ControllerASG
 ```
 
