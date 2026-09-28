@@ -2,4 +2,4 @@ conf.json
 .aws
 infra/state.env
 bin/
-decisions.json
+decisions.jsonl

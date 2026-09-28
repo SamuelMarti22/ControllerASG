@@ -18,26 +18,58 @@
     "targetPort": 80
   },
   "pollIntervalSeconds": 60,
+  "observationWindowSeconds": 300,
   "cooldownSeconds": 300,
   "metrics": [
     {
+      "namespace": "AWS/ApplicationELB",
+      "metricName": "RequestCountPerTarget",
+      "dimensions": [
+        {
+          "name": "TargetGroup",
+          "value": "targetgroup/mi-tg/xxxx"
+        },
+        {
+          "name": "LoadBalancer",
+          "value": "app/mi-alb/yyyy"
+        }
+      ],
+      "period": 60,
+      "stat": "Sum",
+      "scaling": {
+        "scaleUpThreshold": 1000,
+        "scaleDownThreshold": 200
+      }
+    },
+    {
+      "namespace": "AWS/ApplicationELB",
+      "metricName": "TargetResponseTime",
+      "dimensions": [
+        {
+          "name": "TargetGroup",
+          "value": "targetgroup/mi-tg/xxxx"
+        },
+        {
+          "name": "LoadBalancer",
+          "value": "app/mi-alb/yyyy"
+        }
+      ],
+      "period": 60,
+      "stat": "Average",
+      "scaling": {
+        "scaleUpThreshold": 0.5,
+        "scaleDownThreshold": 0.1
+      }
+    },
+    {
       "namespace": "AWS/EC2",
       "metricName": "CPUUtilization",
+      "perInstance": true,
       "period": 60,
       "stat": "Average",
       "scaling": {
         "scaleUpThreshold": 70,
         "scaleDownThreshold": 20
-      }
-    },
-    {
-      "namespace": "AWS/EC2",
-      "metricName": "NetworkIn",
-      "period": 60,
-      "stat": "Average",
-      "scaling": {
-        "scaleUpThreshold": 5000000,
-        "scaleDownThreshold": 500000
       }
     }
   ],
